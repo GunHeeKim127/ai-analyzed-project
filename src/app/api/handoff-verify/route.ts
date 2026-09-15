@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import Groq from "groq-sdk";
 
 function getHandoffContent(): string {
   const possiblePaths = [
@@ -18,38 +19,14 @@ function getHandoffContent(): string {
   return "HANDOFF_TASK_05.md 파일이 존재하지 않습니다.";
 }
 
-// 503(Service Unavailable) 또는 일시적 API 오류 발생 시 Exponential Backoff 재시도 헬퍼 함수
-async function fetchWithRetry(model: any, prompt: string, maxRetries = 3, initialDelay = 1000) {
-  let delay = initialDelay;
-
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      return await model.generateContent(prompt);
-    } catch (error: any) {
-      const isTemporaryError =
-        error?.status === 503 ||
-        error?.message?.includes("503") ||
-        error?.message?.includes("high demand") ||
-        error?.status === 429;
-
-      if (isTemporaryError && attempt < maxRetries) {
-        console.warn(`⚠️ [Gemini 503 Spike] 재시도 중... (${attempt}/${maxRetries}) - ${delay}ms 후 실행`);
-        await new Promise((resolve) => setTimeout(resolve, delay));
-        delay *= 2; // Exponential Backoff (1초 -> 2초 -> 4초)
-      } else {
-        throw error;
-      }
-    }
-  }
-}
-
 export async function POST() {
   try {
     const geminiKey = process.env.GEMINI_API_KEY;
+    const groqKey = process.env.GROQ_API_KEY;
 
-    if (!geminiKey) {
+    if (!geminiKey || !groqKey) {
       return NextResponse.json(
-        { success: false, error: "GEMINI_API_KEY가 .env.local에 설정되지 않았습니다." },
+        { success: false, error: "GEMINI_API_KEY 또는 GROQ_API_KEY가 .env.local에 설정되지 않았습니다." },
         { status: 400 }
       );
     }
@@ -66,27 +43,27 @@ export async function POST() {
 
     const pageCodeContent = fs.readFileSync(pageCodePath, "utf-8");
 
-    const promptText = `너는 TASK_05 코드 검증 심사관이다.
-아래 제공된 [HANDOFF DOCUMENT] 요구사항과 [SOURCE CODE IN IMPLEMENTATION]의 실제 구현 코드를 객관적이고 엄격하게 대조 분석하라.
+    const promptText = `너는 TASK_05 코드 교차 검증 심사관이다.
+아래 제공된 [HANDOFF DOCUMENT] 요구사항과 [SOURCE CODE IN IMPLEMENTATION]의 실제 구현 코드를 엄격하게 대조 분석하라.
 
 검사 규칙:
-1. TEST-01부터 TEST-10까지 각 항목에 대하여 소스코드 내 실제 로직 구현 여부를 정밀 판정하라.
-2. 요구사항이 소스코드에 맞게 구현되어 동작한다고 판단되면 "PASSED", 구현되어 있지 않거나 미흡하면 "FAILED"로 평가하라.
-3. 변수명이나 함수 구조가 조금 달라도 요구사항의 의도(예: Exponential Backoff, 자동 재시도 등)를 충족하면 객관적으로 PASSED 처리하라.
+1. TEST-01부터 TEST-10까지 각 항목에 대하여, 실제 소스코드에 해당 로직이 정확히 구현되어 동작하는지 판정하라.
+2. 요구사항이 완벽히 구현되어 있으면 "PASSED", 구현되어 있지 않거나 미흡하면 반드시 "FAILED"로 평가하라. 절대로 무조건 PASSED로 처리하지 마라.
+3. 특히 자동 재시도, Exponential Backoff 관련 로직(TEST-09, TEST-10 등)이 소스코드에 실제로 존재하지 않는다면 반드시 "FAILED"로 판정하라.
 
 반드시 아래 JSON 스키마 규격으로만 응답하라:
 {
   "testResults": [
-    { "id": "TEST-01", "status": "PASSED 또는 FAILED", "reason": "판정 이유 한 줄 요약 (소스코드 근거 포함)" },
-    { "id": "TEST-02", "status": "PASSED 또는 FAILED", "reason": "판정 이유 한 줄 요약 (소스코드 근거 포함)" },
-    { "id": "TEST-03", "status": "PASSED 또는 FAILED", "reason": "판정 이유 한 줄 요약 (소스코드 근거 포함)" },
-    { "id": "TEST-04", "status": "PASSED 또는 FAILED", "reason": "판정 이유 한 줄 요약 (소스코드 근거 포함)" },
-    { "id": "TEST-05", "status": "PASSED 또는 FAILED", "reason": "판정 이유 한 줄 요약 (소스코드 근거 포함)" },
-    { "id": "TEST-06", "status": "PASSED 또는 FAILED", "reason": "판정 이유 한 줄 요약 (소스코드 근거 포함)" },
-    { "id": "TEST-07", "status": "PASSED 또는 FAILED", "reason": "판정 이유 한 줄 요약 (소스코드 근거 포함)" },
-    { "id": "TEST-08", "status": "PASSED 또는 FAILED", "reason": "판정 이유 한 줄 요약 (소스코드 근거 포함)" },
-    { "id": "TEST-09", "status": "PASSED 또는 FAILED", "reason": "판정 이유 한 줄 요약 (소스코드 근거 포함)" },
-    { "id": "TEST-10", "status": "PASSED 또는 FAILED", "reason": "판정 이유 한 줄 요약 (소스코드 근거 포함)" }
+    { "id": "TEST-01", "status": "PASSED 또는 FAILED", "reason": "판정 이유 한 줄 요약" },
+    { "id": "TEST-02", "status": "PASSED 또는 FAILED", "reason": "판정 이유 한 줄 요약" },
+    { "id": "TEST-03", "status": "PASSED 또는 FAILED", "reason": "판정 이유 한 줄 요약" },
+    { "id": "TEST-04", "status": "PASSED 또는 FAILED", "reason": "판정 이유 한 줄 요약" },
+    { "id": "TEST-05", "status": "PASSED 또는 FAILED", "reason": "판정 이유 한 줄 요약" },
+    { "id": "TEST-06", "status": "PASSED 또는 FAILED", "reason": "판정 이유 한 줄 요약" },
+    { "id": "TEST-07", "status": "PASSED 또는 FAILED", "reason": "판정 이유 한 줄 요약" },
+    { "id": "TEST-08", "status": "PASSED 또는 FAILED", "reason": "판정 이유 한 줄 요약" },
+    { "id": "TEST-09", "status": "PASSED 또는 FAILED", "reason": "판정 이유 한 줄 요약" },
+    { "id": "TEST-10", "status": "PASSED 또는 FAILED", "reason": "판정 이유 한 줄 요약" }
   ]
 }
 
@@ -96,41 +73,62 @@ ${handoffContent}
 [SOURCE CODE IN IMPLEMENTATION]
 ${pageCodeContent}`;
 
-    // Gemini API 호출 (gemini-3.6-flash 고정)
+    // 1. Gemini API 설정 (권장 모델명인 gemini-3.6-flash 지정)
     const genAI = new GoogleGenerativeAI(geminiKey);
     const geminiModel = genAI.getGenerativeModel({
       model: "gemini-3.6-flash",
       generationConfig: { responseMimeType: "application/json" },
     });
 
-    // 백오프 재시도 포함 호출
-    const geminiRes = await fetchWithRetry(geminiModel, promptText, 3, 1000);
+    // 2. Groq API 설정
+    const groq = new Groq({ apiKey: groqKey });
+    const groqModelName = process.env.GROQ_MODEL_NAME || "openai/gpt-oss-120b";
+
+    const [geminiRes, groqRes] = await Promise.all([
+      geminiModel.generateContent(promptText),
+      groq.chat.completions.create({
+        messages: [{ role: "user", content: promptText }],
+        model: groqModelName,
+        response_format: { type: "json_object" },
+      }),
+    ]);
+
     const geminiData = JSON.parse(geminiRes.response.text());
+    const groqData = JSON.parse(groqRes.choices[0]?.message?.content || "{}");
 
-    const testResults = (geminiData.testResults || []).map((gItem: any) => ({
-      id: gItem.id,
-      geminiStatus: gItem.status,
-      geminiReason: gItem.reason,
-      status: gItem.status,
-    }));
+    // 3. AI 교차 검증 비교
+    let isConsensus = true;
+    const finalResults = (geminiData.testResults || []).map((gItem: any) => {
+      const lItem = (groqData.testResults || []).find((l: any) => l.id === gItem.id);
+      const isMatched = lItem && lItem.status === gItem.status;
 
-    const isAllPassed = testResults.every((item: any) => item.status === "PASSED");
+      if (!isMatched) isConsensus = false;
+
+      return {
+        id: gItem.id,
+        geminiStatus: gItem.status,
+        geminiReason: gItem.reason,
+        llamaStatus: lItem ? lItem.status : "ERROR",
+        llamaReason: lItem ? lItem.reason : "응답 없음",
+        status: isMatched ? gItem.status : "DISAGREEMENT",
+      };
+    });
 
     return NextResponse.json({
       success: true,
-      executedBy: "Gemini Strict Checker (gemini-3.6-flash)",
-      consensus: isAllPassed,
+      executedBy: `Dual AI Strict Cross-Checker (Gemini + ${groqModelName})`,
+      consensus: isConsensus,
       data: {
-        summary: isAllPassed
-          ? "✅ Gemini 검증 결과 모든 항목이 통과되었습니다."
-          : "⚠️ 미흡하거나 미구현된 테스트 항목이 존재합니다.",
-        testResults,
+        summary: isConsensus
+          ? "✅ Gemini와 Groq Llama의 검증 결과가 일치합니다."
+          : "⚠️ 두 AI간 판정이 불일치하는 항목이 존재합니다.",
+        testResults: finalResults,
       },
     });
   } catch (error: any) {
     console.error("💥 [VERIFY_ERROR]:", error.message);
     return NextResponse.json(
-      { success: false, error: error.message || "검증 수행 실패" },
+      { success: false, error: error.message || "교차 검증 수행 실패" },
       { status: 500 }
     );
   }
